@@ -1,107 +1,138 @@
 import dash
-from dash import dcc, html, Input, Output, State, dash_table
-import plotly.express as px
+from dash import dcc, html, Input, Output
+import dash_cytoscape as cyto
 from fetch_data import fetch_data
+import plotly.express as px
+import pandas as pd
 
-# Fetch data from SQL Server
+# Fetch data
 df = fetch_data()
 
-# PINK COMMENT: Aggregate data for the main table to remove `SEX_CODE` split initially
-df_main_table = (
-    df.groupby(["NodeId", "Title"])
-    .agg({"NationalIdCount": "sum"})
-    .reset_index()
-)
+# Debug: Check if data is correctly fetched
+if "EMPLOYM_TYPE" not in df.columns:
+    raise ValueError("EMPLOYM_TYPE column is missing. Ensure the SQL query is correct.")
+
+# Prepare data for hierarchical tree
+def generate_tree_elements(data):
+    elements = []
+    for _, row in data.iterrows():
+        # Add node
+        elements.append({"data": {"id": row["NodeId"], "label": row["Title"]}})
+        # Add edge (parent-child relationship)
+        if row["ParentId"] and row["ParentId"] != "Root":
+            elements.append({"data": {"source": row["ParentId"], "target": row["NodeId"]}})
+    return elements
+
+tree_elements = generate_tree_elements(df)
 
 # Initialize Dash app
 app = dash.Dash(__name__, suppress_callback_exceptions=True)
-app.title = "Hierarchy Dashboard"
+app.title = "Hierarchy Tree"
 server = app.server
 
-# Layout for displaying all nodes
-all_nodes_table = dash_table.DataTable(
-    id="all-nodes-table",
-    columns=[
-        {"name": "NodeId", "id": "NodeId"},
-        {"name": "Title", "id": "Title"},
-        {"name": "NationalIdCount", "id": "NationalIdCount"},
-    ],
-    data=df_main_table.to_dict("records"),  # PINK COMMENT: Use aggregated data here
-    style_table={"height": "300px", "overflowY": "auto"},
-    row_selectable="single",
-    selected_rows=[],
-)
-
-# Main layout
+# Layout
 app.layout = html.Div([
-    html.H1("Hierarchy Dashboard", style={"textAlign": "center"}),
+    html.H1("Hierarchy Tree", style={"textAlign": "center"}),
 
+    # Hierarchical tree visualization
+    cyto.Cytoscape(
+        id="hierarchy-tree",
+        layout={"name": "breadthfirst"},  # Hierarchical layout
+        style={"width": "100%", "height": "600px"},
+        elements=tree_elements,
+        stylesheet=[
+            {
+                "selector": "node",
+                "style": {
+                    "content": "data(label)",
+                    "text-valign": "center",
+                    "color": "black",
+                    "background-color": "lightblue",
+                },
+            },
+            {
+                "selector": "edge",
+                "style": {
+                    "width": 2,
+                    "line-color": "#ccc",
+                    "target-arrow-color": "#ccc",
+                    "target-arrow-shape": "triangle",
+                },
+            },
+        ],
+    ),
+
+    # Display node details
+    html.Div(id="node-details-container", style={"marginTop": "20px"}),
+
+    # Display gender and employment type distributions
     html.Div([
-        html.H3("All Nodes"),
-        all_nodes_table,
-    ], style={"marginBottom": "20px"}),
-
-    html.Div(id="filtered-data-container"),
-
-    html.Div(id="gender-chart-container", style={"marginTop": "20px"}),  # PINK COMMENT: Added container for the donut chart
+        html.Div(id="gender-chart-container", style={"display": "inline-block", "width": "48%"}),
+        html.Div(id="employment-chart-container", style={"display": "inline-block", "width": "48%"}),
+    ], style={"marginTop": "20px"}),
 ])
 
-# PINK COMMENT: Callback to display filtered data and gender distribution automatically
 @app.callback(
-    Output("filtered-data-container", "children"),
-    Output("gender-chart-container", "children"),  # PINK COMMENT: Added output for the donut chart
-    Input("all-nodes-table", "selected_rows"),
-    prevent_initial_call=True,
+    [Output("node-details-container", "children"),
+     Output("gender-chart-container", "children"),
+     Output("employment-chart-container", "children")],
+    [Input("hierarchy-tree", "tapNodeData")]
 )
-def display_node_and_gender(selected_rows):
-    if not selected_rows:
-        return html.H3("No Node Selected"), None
+def display_node_details(node_data):
+    if not node_data:
+        return html.H3("Select a node to see details"), None, None
 
-    selected_row = selected_rows[0]
-    node_id = df_main_table.iloc[selected_row]["NodeId"]  # PINK COMMENT: Use aggregated data for NodeId
-
-    # Filter data for the selected node
+    node_id = node_data["id"]
     filtered_data = df[df["NodeId"] == node_id]
 
-    # Gender Count and Donut Chart Section
-    if filtered_data["SEX_CODE"].isnull().all():
-        return html.H3(f"Filtered Data for Node ID {node_id}"), html.H3("No Gender Data Available")
+    # Gender Distribution
+    if filtered_data.empty:
+        gender_chart = html.H3("No Gender Data Available")
+    else:
+        gender_count = pd.DataFrame({
+            "Gender": ["Male", "Female"],
+            "Count": [filtered_data.iloc[0]["MaleCount"], filtered_data.iloc[0]["FemaleCount"]],
+        })
 
-    # PINK COMMENT: Calculate gender distribution
-    gender_count = (
-        filtered_data.groupby("SEX_CODE")
-        .agg({"NationalIdCount": "sum", "Title": "first"})
-        .reset_index()
-    )
-    gender_map = {"1": "Male", "2": "Female"}
-    gender_count["SEX_CODE"] = gender_count["SEX_CODE"].map(gender_map)
+        gender_fig = px.pie(
+            gender_count,
+            names="Gender",
+            values="Count",
+            title="Gender Distribution",
+            hole=0.4,
+        )
+        gender_chart = dcc.Graph(figure=gender_fig)
 
-    # PINK COMMENT: Create the gender distribution chart
-    fig = px.pie(
-        gender_count,
-        names="SEX_CODE",
-        values="NationalIdCount",
-        title=f"Gender Distribution for Node ID {node_id}",
-        hole=0.4,  # Create the donut effect
-    )
-    fig.update_traces(textinfo="percent+label", hoverinfo="label+value")
+    # Employment Type Distribution
+    if filtered_data.empty or filtered_data["EMPLOYM_TYPE"].isnull().all():
+        employment_chart = html.H3("No Employment Type Data Available")
+    else:
+        employment_count = (
+            filtered_data.groupby("EMPLOYM_TYPE")
+            .size()
+            .reset_index(name="Count")
+        )
+        employment_fig = px.pie(
+            employment_count,
+            names="EMPLOYM_TYPE",
+            values="Count",
+            title="Employment Type Distribution",
+            hole=0.4,
+        )
+        employment_chart = dcc.Graph(figure=employment_fig)
 
-    # PINK COMMENT: Return filtered table and chart
-    return (
-        html.Div([
-            html.H3(f"Filtered Data for Node ID {node_id}"),
-            dash_table.DataTable(
-                id="filtered-data-table",
-                columns=[
-                    {"name": col, "id": col}
-                    for col in filtered_data.columns if col != "SEX_CODE"
-                ],
-                data=filtered_data.to_dict("records"),
-                style_table={"overflowX": "auto"},
+    # Node Details
+    node_details = html.Div([
+        html.H3(f"Node Details for {node_data['label']}"),
+        html.Pre(
+            "\n".join(
+                [f"{key}: {value}" for key, value in filtered_data.iloc[0].items()]
             ),
-        ]),
-        dcc.Graph(figure=fig, id="gender-donut-chart"),  # PINK COMMENT: Display the donut chart
-    )
+            style={"whiteSpace": "pre-wrap"},
+        ),
+    ])
+
+    return node_details, gender_chart, employment_chart
 
 if __name__ == "__main__":
     app.run_server(debug=True, host="0.0.0.0", port=8080)

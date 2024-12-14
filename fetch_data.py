@@ -23,7 +23,9 @@ def fetch_data():
         h.Level, 
         h.Title,
         COUNT(e.NATIONAL_No) AS NationalIdCount,
-        e.SEX_CODE
+        SUM(CASE WHEN e.SEX_CODE = '1' THEN 1 ELSE 0 END) AS MaleCount,
+        SUM(CASE WHEN e.SEX_CODE = '2' THEN 1 ELSE 0 END) AS FemaleCount,
+        e.EMPLOYM_TYPE
     FROM 
         HierarchyTable_Final h
     LEFT JOIN 
@@ -32,7 +34,7 @@ def fetch_data():
         h.NodeId = e.HoldingCode
     GROUP BY 
         h.NodeId, h.ParentId, h.Level1, h.Level2, h.Level3, h.Level4, 
-        h.FullPath, h.Level, h.Title, e.SEX_CODE
+        h.FullPath, h.Level, h.Title, e.EMPLOYM_TYPE
     """
     df = pd.read_sql(query, conn)
     conn.close()
